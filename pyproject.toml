@@ -1,26 +1,28 @@
 [project]
-name = "quantum-hackday"
+name = "ciphercanvas"
 version = "0.1.0"
-description = "CipherCanvas: post-quantum media vault"
+description = "CipherCanvas: Intelligent Post-Quantum Data Protection and Secure Media Vault"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "cryptography",
+    "cryptography>=50.0.0",
     "numpy",
     "pandas",
     "pillow",
+    "qiskit>=2.0.0",
+    "qiskit-aer>=0.18.0",
     "streamlit",
 ]
 
 [dependency-groups]
-dev = ["pytest", "ruff"]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
-
-[tool.ruff]
-line-length = 88
-target-version = "py312"
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "N", "W"]
