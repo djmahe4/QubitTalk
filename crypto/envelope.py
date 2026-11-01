@@ -17,7 +17,7 @@ NONCE_LENGTH_BYTES = 12
 def _text(value: Any, field: str) -> str:
     """Return `value` if it is a string; never coerce, so numbers/lists/null are rejected."""
     if not isinstance(value, str):
-        raise ValueError(f"Envelope field '{field}' must be a string, got {type(value).__name__}")
+        raise TypeError(f"Envelope field '{field}' must be a string, got {type(value).__name__}")
     return value
 
 

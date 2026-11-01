@@ -122,9 +122,8 @@ class TestEnvelope(unittest.TestCase):
                 for key in path[:-1]:
                     target = target[key]
                 target[path[-1]] = bad
-                with self.subTest(field=path[-1], value=bad):
-                    with self.assertRaises(ValueError):
-                        EncryptionEnvelope.from_bytes(json.dumps(raw).encode("utf-8"))
+                with self.subTest(field=path[-1], value=bad), self.assertRaises(ValueError):
+                    EncryptionEnvelope.from_bytes(json.dumps(raw).encode("utf-8"))
 
     def test_non_json_input_rejected(self):
         with self.assertRaises(ValueError):
