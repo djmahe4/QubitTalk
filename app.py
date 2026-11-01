@@ -1,6 +1,7 @@
-
 import pandas as pd
 import streamlit as st
+
+from src.media import MediaError, embed, extract
 
 st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
 st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
@@ -12,17 +13,20 @@ st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
 def protect_png(
     png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str
 ) -> bytes:
-    """Embed a hidden message + signature into a PNG. (STUB)"""
-    return png_bytes
+    """Embed the message in a PNG via LSB.
+
+    TODO(Melvin's envelope): the payload is currently PLAINTEXT, unsigned.
+    """
+    return embed(png_bytes, message.encode("utf-8"))
 
 
 def extract_and_verify(png_bytes: bytes) -> dict:
-    """Extract hidden message, verify signature, run tamper detection. (STUB)"""
+    """Extract the hidden message. Signature/tamper checks await the envelope."""
     return {
-        "signature_valid": True,
-        "message": "Hidden message extracted here",
-        "tamper_detected": False,
-        "algorithm": "HNDL-Dilithium hybrid",
+        "signature_valid": None,  # None = not checked (no crypto yet)
+        "message": extract(png_bytes).decode("utf-8", errors="replace"),
+        "tamper_detected": None,
+        "algorithm": "none (plaintext LSB placeholder)",
     }
 
 
@@ -74,12 +78,16 @@ with tab_create:
         if uploaded is None or not message:
             st.warning("Upload a PNG and enter a message first.")
         else:
-            protected_bytes = protect_png(
-                uploaded.getvalue(), message, sensitivity, retention, mode
-            )
-            st.success(
-                f"✅ Embedded with HNDL hybrid scheme · sensitivity **{sensitivity}** · "
-                f"retention **{retention} days** · mode **{mode}**"
+            try:
+                protected_bytes = protect_png(
+                    uploaded.getvalue(), message, sensitivity, retention, mode
+                )
+            except MediaError as exc:
+                st.error(f"❌ {exc}")
+                st.stop()
+            st.warning(
+                "Message embedded as **plaintext** (no encryption yet — "
+                "waiting on the crypto envelope). Do not use for real secrets."
             )
             st.download_button(
                 "⬇️ Download protected image",
@@ -102,22 +110,23 @@ with tab_unlock:
         if protected is None:
             st.warning("Upload a protected image first.")
         else:
-            result = extract_and_verify(protected.getvalue())
+            try:
+                result = extract_and_verify(protected.getvalue())
+            except MediaError as exc:
+                st.error(f"❌ {exc}")
+                st.stop()
 
-            # Signature status
-            if result["signature_valid"]:
+            if result["signature_valid"] is None:
+                st.info("ℹ️ Signature and tamper checks not available yet.")
+            elif result["signature_valid"]:
                 st.success(f"✅ Signature valid — {result['algorithm']}")
             else:
                 st.error("❌ Signature invalid")
 
-            # Tamper detection
             if result["tamper_detected"]:
                 st.error("🚨 Tamper detected — image has been modified!")
-            else:
-                st.success("🛡️ No tampering detected")
 
-            # Decrypted message
-            with st.expander("🔓 Reveal decrypted message", expanded=True):
+            with st.expander("🔓 Extracted message", expanded=True):
                 st.code(result["message"], language="text")
 
 # ==================================================================
