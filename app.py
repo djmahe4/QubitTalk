@@ -1,18 +1,58 @@
+"""CipherCanvas Streamlit app.
+
+Shows which pipeline stages are real and which are still placeholders, so the
+demo never implies cryptography that is not running.
+"""
+
 import pandas as pd
 import streamlit as st
 
+from crypto.envelope import EncryptionEnvelope
 from src.media import MediaError, embed, extract
 
-st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
-st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
+st.set_page_config(page_title="CipherCanvas", layout="wide")
+st.title("🔐 CipherCanvas — Post-Quantum Media Vault")
+
+# Status of every stage in the Alice -> Bob pipeline. Update as modules land.
+PIPELINE = [
+    ("1. HNDL risk advisor", "⏳ stub", "Inputs collected, no recommendation yet."),
+    ("2. Hybrid key setup (X25519 + ML-KEM)", "⏳ not built", "Will produce ephemeral_public_key + kem_ciphertext."),
+    ("3. Key mixing (HKDF)", "⏳ not built", "Will merge both secrets into one AES key."),
+    ("4. Encryption (AES-256-GCM)", "⏳ not built", "Will produce aes_gcm_nonce + encrypted_payload."),
+    ("5. Signature (ML-DSA)", "⏳ not built", "Will sign the envelope fields."),
+    ("6. Envelope format", "✅ ready", "crypto/envelope.py: pack, parse, signed-bytes layout."),
+    ("7. PNG LSB embed / extract", "✅ ready", "src/media.py: hides bytes in pixel low bits."),
+    ("8. CBOM", "⏳ not built", "Will list algorithms, profile, timestamp, pqc_ready."),
+    ("9. Qiskit lab", "⏳ stub", "Counts below are hard-coded, not simulated."),
+]
+
+# Plain-language meaning of each envelope field (see crypto/envelope.py).
+ENVELOPE_FIELDS = {
+    "version": "Format edition; only 1.0 is accepted.",
+    "sender_id": "Who sent it (From).",
+    "recipient_id": "Who can open it (To).",
+    "algorithms": "Which key setup, cipher and signature were used. Signed, so it cannot be silently downgraded.",
+    "ephemeral_public_key": "Alice's one-time X25519 public key (classical half of the hybrid lock).",
+    "kem_ciphertext": "ML-KEM output (post-quantum half). Empty for classical-only.",
+    "aes_gcm_nonce": "12-byte one-time number; never reused with the same key.",
+    "encrypted_payload": "The message, AES-GCM encrypted, with its tamper tag.",
+    "signature": "Sender's signature over every field above, length-prefixed so field boundaries cannot shift.",
+}
+
+with st.sidebar:
+    st.header("Pipeline status")
+    st.caption("What actually runs in this build.")
+    for stage, status, note in PIPELINE:
+        st.markdown(f"**{stage}** — {status}  \n<small>{note}</small>", unsafe_allow_html=True)
+    with st.expander("Envelope fields explained"):
+        for name, meaning in ENVELOPE_FIELDS.items():
+            st.markdown(f"- `{name}`: {meaning}")
 
 
 # ------------------------------------------------------------------
 # Placeholder backends — replace with real implementations
 # ------------------------------------------------------------------
-def protect_png(
-    png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str
-) -> bytes:
+def protect_png(png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str) -> bytes:
     """Embed the message in a PNG via LSB.
 
     TODO(Melvin's envelope): the payload is currently PLAINTEXT, unsigned.
@@ -21,22 +61,47 @@ def protect_png(
 
 
 def extract_and_verify(png_bytes: bytes) -> dict:
-    """Extract the hidden message. Signature/tamper checks await the envelope."""
+    """Extract the hidden bytes and parse them as an envelope if possible.
+
+    Signature verification and decryption are not implemented yet, so an
+    envelope's payload is shown as sizes only, never as decrypted text.
+    """
+    raw = extract(png_bytes)
+    try:
+        envelope = EncryptionEnvelope.from_bytes(raw)
+    except ValueError:
+        envelope = None
     return {
         "signature_valid": None,  # None = not checked (no crypto yet)
-        "message": extract(png_bytes).decode("utf-8", errors="replace"),
+        "envelope": envelope,
+        "message": None if envelope else raw.decode("utf-8", errors="replace"),
         "tamper_detected": None,
-        "algorithm": "none (plaintext LSB placeholder)",
     }
+
+
+def envelope_table(env: EncryptionEnvelope) -> pd.DataFrame:
+    """One row per envelope field: what it holds and what it means."""
+    alg = env.algorithms
+    values = {
+        "version": env.version,
+        "sender_id": env.sender_id,
+        "recipient_id": env.recipient_id,
+        "algorithms": f"{alg.key_establishment} | {alg.encryption} | {alg.signature}",
+        "ephemeral_public_key": f"{len(env.ephemeral_public_key)} bytes",
+        "kem_ciphertext": f"{len(env.kem_ciphertext)} bytes",
+        "aes_gcm_nonce": f"{len(env.aes_gcm_nonce)} bytes",
+        "encrypted_payload": f"{len(env.encrypted_payload)} bytes",
+        "signature": f"{len(env.signature)} bytes",
+    }
+    return pd.DataFrame(
+        [(k, v, ENVELOPE_FIELDS[k]) for k, v in values.items()],
+        columns=["Field", "Value", "Meaning"],
+    )
 
 
 def run_circuit(circuit_type: str) -> dict:
     """Run a Qiskit circuit. (STUB)"""
-    counts = (
-        {"00": 512, "11": 512}
-        if circuit_type == "entanglement"
-        else {"0": 524, "1": 500}
-    )
+    counts = {"00": 512, "11": 512} if circuit_type == "entanglement" else {"0": 524, "1": 500}
     return {"counts": counts, "shots": 1024}
 
 
@@ -62,9 +127,7 @@ with tab_create:
     message = st.text_area("Enter hidden message", placeholder="Top-secret payload…")
     col1, col2 = st.columns(2)
     with col1:
-        sensitivity = st.select_slider(
-            "Sensitivity", options=["Low", "Medium", "High", "Critical"], value="High"
-        )
+        sensitivity = st.select_slider("Sensitivity", options=["Low", "Medium", "High", "Critical"], value="High")
     with col2:
         retention = st.slider("Retention (days)", min_value=1, max_value=365, value=30)
 
@@ -79,9 +142,7 @@ with tab_create:
             st.warning("Upload a PNG and enter a message first.")
         else:
             try:
-                protected_bytes = protect_png(
-                    uploaded.getvalue(), message, sensitivity, retention, mode
-                )
+                protected_bytes = protect_png(uploaded.getvalue(), message, sensitivity, retention, mode)
             except MediaError as exc:
                 st.error(f"❌ {exc}")
                 st.stop()
@@ -102,9 +163,7 @@ with tab_create:
 with tab_unlock:
     st.subheader("Unlock Cipher Vault")
 
-    protected = st.file_uploader(
-        "Upload protected image", type=["png"], key="unlock_png"
-    )
+    protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
 
     if st.button("🔎 Extract & Verify"):
         if protected is None:
@@ -119,15 +178,21 @@ with tab_unlock:
             if result["signature_valid"] is None:
                 st.info("ℹ️ Signature and tamper checks not available yet.")
             elif result["signature_valid"]:
-                st.success(f"✅ Signature valid — {result['algorithm']}")
+                st.success("✅ Signature valid")
             else:
                 st.error("❌ Signature invalid")
 
             if result["tamper_detected"]:
                 st.error("🚨 Tamper detected — image has been modified!")
 
-            with st.expander("🔓 Extracted message", expanded=True):
-                st.code(result["message"], language="text")
+            if result["envelope"] is not None:
+                st.success("📦 Found an encryption envelope (format v1.0).")
+                st.dataframe(envelope_table(result["envelope"]), width="stretch", hide_index=True)
+                st.caption("Payload not decrypted: verification and decryption are not built yet.")
+            else:
+                st.warning("Not an envelope: this image holds a plaintext payload (pre-crypto build).")
+                with st.expander("🔓 Extracted plaintext", expanded=True):
+                    st.code(result["message"], language="text")
 
 # ==================================================================
 # TAB 3 — Quantum Risk & Benchmarks
@@ -137,10 +202,18 @@ with tab_quantum:
 
     with st.expander("What is HNDL?", expanded=True):
         st.markdown(
-            "**HNDL** is a hybrid post-quantum scheme: classical AES-GCM for bulk "
-            "speed + lattice-based (e.g., Kyber/Dilithium-style) primitives for "
-            "quantum resistance, plus a signature for tamper detection."
+            "**HNDL (Harvest Now, Decrypt Later)** is a threat, not a scheme: attackers "
+            "record encrypted data today and decrypt it once a large quantum computer "
+            "can break RSA/ECC. Data that must stay secret for years is at risk now. "
+            "CipherCanvas responds with **hybrid** protection: X25519 + ML-KEM key setup, "
+            "AES-256-GCM encryption and an ML-DSA signature."
         )
+
+    st.warning(
+        "⚠️ The timing and size figures below are **illustrative placeholders, not "
+        "measurements**. Real Classical vs Hybrid benchmarks replace them once the "
+        "crypto engine runs."
+    )
 
     # Classical vs Hybrid comparison
     st.markdown("### Classical vs Hybrid comparison")
@@ -151,7 +224,7 @@ with tab_quantum:
             "Hybrid-PQC (ms)": [5.4, 3.1, 2.9, 4.7],
         }
     )
-    st.dataframe(compare_df, use_container_width=True)
+    st.dataframe(compare_df, width="stretch")
     st.bar_chart(compare_df.set_index("Metric"))
 
     # Key / ciphertext / signature sizes
@@ -162,7 +235,7 @@ with tab_quantum:
             "Size (bytes)": [1184, 2400, 1088, 2420],
         }
     )
-    st.dataframe(sizes_df, use_container_width=True)
+    st.dataframe(sizes_df, width="stretch")
 
     # Latency charts
     st.markdown("### Latency charts (ms)")
@@ -175,11 +248,11 @@ with tab_quantum:
     )
     st.bar_chart(lat_df.set_index("Operation"))
 
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Public key", "1,184 B", "+38% vs RSA")
-    m2.metric("Ciphertext", "1,088 B", "+42% vs RSA")
-    m3.metric("Signature", "2,420 B", "NIST L3")
-    m4.metric("Quantum safe", "Yes", "NIST FIPS 203/204")
+    st.caption(
+        "Size reference: 1,184 B public key, 2,400 B private key and 1,088 B ciphertext "
+        "are the published ML-KEM-768 sizes (FIPS 203); 2,420 B is the published "
+        "ML-DSA-44 signature size (FIPS 204). Our final parameter sets are not chosen yet."
+    )
 
 # ==================================================================
 # TAB 4 — Qiskit Lab
@@ -193,10 +266,10 @@ with tab_lab:
         horizontal=True,
     )
 
+    st.warning("⚠️ Stub: counts are hard-coded, not simulated. The Aer order-finding lab replaces this.")
+
     if st.button("▶️ Run circuit", type="primary"):
-        result = run_circuit(
-            circuit_type.lower().split(" ")[0].split("(")[0] or "superposition"
-        )
+        result = run_circuit(circuit_type.lower().split(" ")[0].split("(")[0] or "superposition")
 
         counts = result["counts"]
         st.markdown("### Measurement counts")
