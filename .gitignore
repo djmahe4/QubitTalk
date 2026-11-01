@@ -219,6 +219,14 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Cryptography keys and secrets (Golden Rule 6)
+*.pem
+*.key
+*.priv
+keys/
+secrets/
+.env
+
 # Local tool state and Office lock files
 .free-llm-mcp/
 ~$*
