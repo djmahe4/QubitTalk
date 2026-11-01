@@ -226,3 +226,7 @@ __marimo__/
 keys/
 secrets/
 .env
+
+# Local tool state and Office lock files
+.free-llm-mcp/
+~$*
