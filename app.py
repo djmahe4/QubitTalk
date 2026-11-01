@@ -4,8 +4,10 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
-st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
+from crypto.keys import KeyError_, generate, unlock
+
+st.set_page_config(page_title="Qubit Talks — PQC", layout="wide")
+st.title("🔐 Qubit Talks — Hybrid Post-Quantum Messaging (HNDL)")
 
 # ------------------------------------------------------------------
 # Placeholder backends — replace with real implementations
@@ -29,20 +31,68 @@ def run_circuit(circuit_type: str) -> dict:
     return {"counts": counts, "shots": 1024}
 # ------------------------------------------------------------------
 
-tab_create, tab_unlock, tab_quantum, tab_lab = st.tabs(
+tab_keys, tab_create, tab_unlock, tab_quantum, tab_lab = st.tabs(
     [
-        "1️⃣ Create Cipher Vault",
-        "2️⃣ Unlock Cipher Vault",
+        "🔑 My Keys",
+        "1️⃣ Create Qubit Talk",
+        "2️⃣ Unlock Qubit Talk",
         "3️⃣ Quantum Risk & Benchmarks",
         "4️⃣ Qiskit Lab",
     ]
 )
 
 # ==================================================================
-# TAB 1 — Create Cipher Vault
+# TAB 0 — My Keys (create a key pair, unlock it with a passphrase)
+# ==================================================================
+with tab_keys:
+    st.subheader("My Keys")
+    left, right = st.columns(2)
+
+    with left:
+        st.markdown("**Create a new key pair**")
+        key_name = st.text_input("Your name", key="key_name")
+        key_pass = st.text_input("Passphrase (8+ characters)", type="password", key="key_pass")
+        if st.button("🔑 Generate keys", type="primary"):
+            try:
+                st.session_state["new_keys"] = generate(key_name, key_pass)
+                st.session_state["new_keys_name"] = key_name
+            except KeyError_ as exc:
+                st.session_state.pop("new_keys", None)
+                st.error(str(exc))
+        if "new_keys" in st.session_state:
+            private_file, public_file = st.session_state["new_keys"]
+            who = st.session_state["new_keys_name"]
+            st.success("Keys created. Keep the private file secret; share only the public file.")
+            st.download_button("⬇️ Private key (passphrase-protected)", private_file,
+                               f"{who}_private.qtkey", "application/json")
+            st.download_button("⬇️ Public key (share this)", public_file,
+                               f"{who}_public.json", "application/json")
+
+    with right:
+        st.markdown("**Unlock your private key**")
+        key_file = st.file_uploader("Upload private key (.qtkey)", key="unlock_key")
+        unlock_pass = st.text_input("Passphrase", type="password", key="unlock_pass")
+        if st.button("🔓 Unlock key"):
+            if key_file is None:
+                st.warning("Upload your private key file first.")
+            else:
+                try:
+                    st.session_state["keys"] = unlock(key_file.getvalue(), unlock_pass)
+                except KeyError_ as exc:
+                    st.session_state.pop("keys", None)
+                    st.error(str(exc))
+        if "keys" in st.session_state:
+            active = st.session_state["keys"]
+            st.success(f"🔓 Unlocked as **{active.user_id}** · fingerprint `{active.fingerprint()}`")
+            if st.button("🔒 Lock again"):
+                del st.session_state["keys"]
+                st.rerun()
+
+# ==================================================================
+# TAB 1 — Create Qubit Talk
 # ==================================================================
 with tab_create:
-    st.subheader("Create Cipher Vault")
+    st.subheader("Create Qubit Talk")
 
     uploaded = st.file_uploader("Upload PNG", type=["png"], key="create_png")
 
@@ -73,15 +123,15 @@ with tab_create:
             st.download_button(
                 "⬇️ Download protected image",
                 data=protected_bytes,
-                file_name="protected_cipher_vault.png",
+                file_name="protected_qubit_talk.png",
                 mime="image/png",
             )
 
 # ==================================================================
-# TAB 2 — Unlock Cipher Vault
+# TAB 2 — Unlock Qubit Talk
 # ==================================================================
 with tab_unlock:
-    st.subheader("Unlock Cipher Vault")
+    st.subheader("Unlock Qubit Talk")
 
     protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
 
