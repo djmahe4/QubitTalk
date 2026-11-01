@@ -1,7 +1,18 @@
 [project]
 name = "quantum-hackday"
 version = "0.1.0"
-description = "Add your description here"
+description = "CipherCanvas: post-quantum media vault"
 readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+requires-python = ">=3.12"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pillow",
+    "streamlit",
+]
+
+[dependency-groups]
+dev = ["pytest", "ruff"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

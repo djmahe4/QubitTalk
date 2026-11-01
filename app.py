@@ -1,18 +1,20 @@
-import io
 
 import pandas as pd
 import streamlit as st
-from PIL import Image
 
 st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
 st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
 
+
 # ------------------------------------------------------------------
 # Placeholder backends — replace with real implementations
 # ------------------------------------------------------------------
-def protect_png(png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str) -> bytes:
+def protect_png(
+    png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str
+) -> bytes:
     """Embed a hidden message + signature into a PNG. (STUB)"""
     return png_bytes
+
 
 def extract_and_verify(png_bytes: bytes) -> dict:
     """Extract hidden message, verify signature, run tamper detection. (STUB)"""
@@ -23,10 +25,17 @@ def extract_and_verify(png_bytes: bytes) -> dict:
         "algorithm": "HNDL-Dilithium hybrid",
     }
 
+
 def run_circuit(circuit_type: str) -> dict:
     """Run a Qiskit circuit. (STUB)"""
-    counts = {"00": 512, "11": 512} if circuit_type == "entanglement" else {"0": 524, "1": 500}
+    counts = (
+        {"00": 512, "11": 512}
+        if circuit_type == "entanglement"
+        else {"0": 524, "1": 500}
+    )
     return {"counts": counts, "shots": 1024}
+
+
 # ------------------------------------------------------------------
 
 tab_create, tab_unlock, tab_quantum, tab_lab = st.tabs(
@@ -65,7 +74,9 @@ with tab_create:
         if uploaded is None or not message:
             st.warning("Upload a PNG and enter a message first.")
         else:
-            protected_bytes = protect_png(uploaded.getvalue(), message, sensitivity, retention, mode)
+            protected_bytes = protect_png(
+                uploaded.getvalue(), message, sensitivity, retention, mode
+            )
             st.success(
                 f"✅ Embedded with HNDL hybrid scheme · sensitivity **{sensitivity}** · "
                 f"retention **{retention} days** · mode **{mode}**"
@@ -83,7 +94,9 @@ with tab_create:
 with tab_unlock:
     st.subheader("Unlock Cipher Vault")
 
-    protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
+    protected = st.file_uploader(
+        "Upload protected image", type=["png"], key="unlock_png"
+    )
 
     if st.button("🔎 Extract & Verify"):
         if protected is None:
@@ -165,10 +178,16 @@ with tab_quantum:
 with tab_lab:
     st.subheader("Qiskit Lab")
 
-    circuit_type = st.radio("Choose a circuit", ["Superposition (H)", "Entanglement (CNOT)"], horizontal=True)
+    circuit_type = st.radio(
+        "Choose a circuit",
+        ["Superposition (H)", "Entanglement (CNOT)"],
+        horizontal=True,
+    )
 
     if st.button("▶️ Run circuit", type="primary"):
-        result = run_circuit(circuit_type.lower().split(" ")[0].split("(")[0] or "superposition")
+        result = run_circuit(
+            circuit_type.lower().split(" ")[0].split("(")[0] or "superposition"
+        )
 
         counts = result["counts"]
         st.markdown("### Measurement counts")
