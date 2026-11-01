@@ -345,10 +345,14 @@ git config user.email "<your email>"
 - Branch: `feature/<issue>-<slug>`. Commits: Conventional Commits (`feat(crypto): ...`, `test(media): ...`, `fix(ui): ...`).
 - Squash and merge after one teammate approves and `pytest` is green (preserves author attribution). Solo forkers self-review with Kilo Code ([Section 13](#13-code-review-with-kilo-code-recommended)).
 
+- PR reference: `app.py` is the Streamlit entry point. Every PR names the `app.py` flow it touches or confirms `streamlit run app.py` still starts.
+
 ### PR template
 ```markdown
 ## Summary
 Closes #<n>. <what changed, under 150 lines>
+App reference: `app.py` — <function/section touched, or "unchanged">
+
 
 ## Verification
 - [ ] ruff clean  - [ ] pytest passes  - [ ] reviewed
