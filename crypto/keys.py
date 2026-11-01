@@ -82,7 +82,7 @@ def unlock(private_file: bytes, passphrase: str) -> UnlockedKeys:
         x_priv = ser.load_pem_private_key(data["x25519_pem"].encode("ascii"), pw)
         e_priv = ser.load_pem_private_key(data["ed25519_pem"].encode("ascii"), pw)
         return UnlockedKeys(str(data["id"]), x_priv, e_priv)
-    except (ValueError, KeyError, TypeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         raise KeyFileError(
             "Wrong passphrase or not a valid Qubit Talks key file."
         ) from exc
