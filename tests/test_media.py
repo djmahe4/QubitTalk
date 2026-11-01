@@ -22,9 +22,7 @@ def test_image_barely_changes():
     stego = embed(original, b"hello")
     a = Image.open(io.BytesIO(original)).convert("RGB")
     b = Image.open(io.BytesIO(stego)).convert("RGB")
-    assert all(
-        abs(x - y) <= 1 for p, q in zip(a.getdata(), b.getdata()) for x, y in zip(p, q)
-    )
+    assert all(abs(x - y) <= 1 for p, q in zip(a.getdata(), b.getdata()) for x, y in zip(p, q))
 
 
 def test_empty_payload_rejected():
@@ -42,6 +40,18 @@ def test_oversized_payload_rejected():
 def test_extract_from_clean_image_fails():
     with pytest.raises(MediaError):
         extract(make_png())
+
+
+def test_forged_length_header_rejected():
+    # Header claims more bytes than the image can hold: must raise, not truncate.
+    import numpy as np
+
+    pixels = np.array(Image.open(io.BytesIO(make_png((8, 8)))).convert("RGB")).reshape(-1)
+    pixels[:32] = (pixels[:32] & 0xFE) | 1
+    buf = io.BytesIO()
+    Image.fromarray(pixels.reshape(8, 8, 3), "RGB").save(buf, format="PNG")
+    with pytest.raises(MediaError):
+        extract(buf.getvalue())
 
 
 def test_non_png_rejected():
