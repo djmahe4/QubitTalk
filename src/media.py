@@ -41,12 +41,12 @@ def embed(png_bytes: bytes, payload: bytes) -> bytes:
     if not payload:
         raise MediaError("Payload is empty.")
     pixels = _load_rgb(png_bytes)
-    if len(payload) > pixels.size // 8 - HEADER_BYTES:
-        raise MediaError("Payload too large for this image.")
-
+    flat = pixels.reshape(-1).copy()
     stream = len(payload).to_bytes(HEADER_BYTES, "big") + payload
     bits = np.unpackbits(np.frombuffer(stream, dtype=np.uint8))
-    flat = pixels.reshape(-1).copy()
+    # One carrier byte per bit; an exact fill (bits.size == flat.size) is allowed.
+    if bits.size > flat.size:
+        raise MediaError("Payload too large for this image.")
     flat[: bits.size] = (flat[: bits.size] & 0xFE) | bits
 
     out = io.BytesIO()
@@ -60,7 +60,8 @@ def extract(png_bytes: bytes) -> bytes:
     if flat.size < HEADER_BYTES * 8:
         raise MediaError("Image too small to contain a payload.")
     length = int.from_bytes(np.packbits(flat[: HEADER_BYTES * 8] & 1).tobytes(), "big")
-    if length == 0 or length > flat.size // 8 - HEADER_BYTES:
-        raise MediaError("No embedded payload found.")
     end = (HEADER_BYTES + length) * 8
+    # Reject an empty or corrupted header before slicing, so we never return truncated bytes.
+    if length == 0 or end > flat.size:
+        raise MediaError("No embedded payload found.")
     return np.packbits(flat[HEADER_BYTES * 8 : end] & 1).tobytes()
