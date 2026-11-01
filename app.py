@@ -1,111 +1,472 @@
 import io
+from html import escape
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
-st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
-st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
+from crypto.hybrid import ALGORITHMS, CryptoError, encrypt, verify_and_decrypt
+from crypto.keys import KeyFileError, classify, generate, public_summary, unlock
+from crypto.password import analyze_password_strength
+from src.media import MediaError, capacity, embed, extract
+
+st.set_page_config(page_title="Qubit Talks", page_icon="🔐", layout="wide")
+
+STYLE = """
+<style>
+.block-container {max-width: 1080px; padding-top: 2rem;}
+.qt-hero h1 {font-size: 2.5rem; margin: 0; letter-spacing: -0.02em;}
+.qt-hero p {color: #9AA7C0; margin: .3rem 0 0; font-size: 1.05rem;}
+.qt-pill {display: inline-block; padding: .35rem .9rem; border-radius: 999px;
+          font-size: .85rem; border: 1px solid #2A3553; white-space: nowrap;}
+.qt-ok {background: #12301F; color: #7EE2A8; border-color: #1F5B3A;}
+.qt-lock {background: #2A1F12; color: #F2C078; border-color: #5B411F;}
+.qt-step {font-size: .75rem; color: #6EA8FE; font-weight: 700;
+          letter-spacing: .1em; text-transform: uppercase; margin-bottom: -.4rem;}
+</style>
+"""
+st.markdown(STYLE, unsafe_allow_html=True)
+
 
 # ------------------------------------------------------------------
-# Placeholder backends — replace with real implementations
+# Backends
 # ------------------------------------------------------------------
-def protect_png(png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str) -> bytes:
-    """Embed a hidden message + signature into a PNG. (STUB)"""
-    return png_bytes
+def protect_png(
+    png_bytes: bytes, message: str, sender, recipient_public: bytes
+) -> bytes:
+    """Encrypt + sign the message, then hide the envelope in the PNG (LSB)."""
+    return embed(png_bytes, encrypt(message.encode("utf-8"), sender, recipient_public))
 
-def extract_and_verify(png_bytes: bytes) -> dict:
-    """Extract hidden message, verify signature, run tamper detection. (STUB)"""
-    return {
-        "signature_valid": True,
-        "message": "Hidden message extracted here",
+
+def extract_and_verify(png_bytes: bytes, recipient, sender_public: bytes) -> dict:
+    """Extract the envelope, verify the signature, decrypt, and report tampering."""
+    algorithm = (
+        f"{ALGORITHMS.key_establishment} + {ALGORITHMS.encryption} + "
+        f"{ALGORITHMS.signature} (Classical)"
+    )
+    result = {
+        "signature_valid": False,
         "tamper_detected": False,
-        "algorithm": "HNDL-Dilithium hybrid",
+        "message": "",
+        "algorithm": algorithm,
+        "error": None,
     }
+    try:
+        envelope = extract(png_bytes)
+    except MediaError as exc:
+        result["error"] = str(exc)
+        return result
+    try:
+        result["message"] = verify_and_decrypt(
+            envelope, recipient, sender_public
+        ).decode("utf-8")
+        result["signature_valid"] = True
+    except CryptoError as exc:
+        result["error"], result["tamper_detected"] = str(exc), exc.tampered
+    return result
+
 
 def run_circuit(circuit_type: str) -> dict:
     """Run a Qiskit circuit. (STUB)"""
-    counts = {"00": 512, "11": 512} if circuit_type == "entanglement" else {"0": 524, "1": 500}
+    counts = (
+        {"00": 512, "11": 512}
+        if circuit_type == "entanglement"
+        else {"0": 524, "1": 500}
+    )
     return {"counts": counts, "shots": 1024}
-# ------------------------------------------------------------------
 
-tab_create, tab_unlock, tab_quantum, tab_lab = st.tabs(
+
+# ------------------------------------------------------------------
+# UI helpers
+# ------------------------------------------------------------------
+def step(label: str, title: str) -> None:
+    st.markdown(f'<div class="qt-step">{label}</div>', unsafe_allow_html=True)
+    st.markdown(f"#### {title}")
+
+
+def to_png(upload) -> bytes:
+    """Return PNG bytes; JPGs are converted (LSB hiding needs a lossless format)."""
+    raw = upload.getvalue()
+    if raw[:8] == b"\x89PNG\r\n\x1a\n":
+        return raw
+    out = io.BytesIO()
+    Image.open(io.BytesIO(raw)).convert("RGB").save(out, format="PNG")
+    return out.getvalue()
+
+
+def add_contact(public_file: bytes) -> None:
+    name, _ = public_summary(public_file)
+    contacts = st.session_state.setdefault("contacts", {})
+    if contacts.get(name) != public_file:
+        contacts[name] = public_file
+        st.rerun()
+
+
+def key_intake(prefix: str, allow_private: bool):
+    """One upload box for any key file: public keys become contacts, a private key unlocks."""
+    files = st.file_uploader(
+        "Drop key files here",
+        type=["qtkey", "json"],
+        accept_multiple_files=True,
+        key=f"{prefix}_files",
+        help="Accepts both file types. Public keys are added to your contacts; "
+        "a private key (.qtkey) is opened with its passphrase.",
+    )
+    private = None
+    for f in files or []:
+        raw = f.getvalue()
+        kind = classify(raw)
+        try:
+            if kind == "public":
+                add_contact(raw)
+                st.caption(f"✓ {public_summary(raw)[0]}: public key added to contacts")
+            elif kind == "private" and allow_private:
+                private = raw
+            elif kind == "private":
+                st.warning(
+                    f"{f.name} is a private key. Keep it secret and open it in the Keys tab."
+                )
+            else:
+                st.error(f"{f.name} is not a Qubit Talks key file.")
+        except KeyFileError as exc:
+            st.error(f"{f.name}: {exc}")
+    return private
+
+
+def activate(private_file: bytes, passphrase: str) -> None:
+    keys = unlock(private_file, passphrase)
+    st.session_state["keys"] = keys
+    st.session_state.pop("protected", None)
+    add_contact(keys.public_json())
+    st.rerun()
+
+
+def render_password_strength(password: str) -> None:
+    """Render interactive password strength meter and quantum security metrics."""
+    res = analyze_password_strength(password)
+    c_status, c_bar = st.columns([1, 3], vertical_alignment="center")
+    badge = (
+        '<span style="display:inline-block; padding: 4px 14px; border-radius: 999px; '
+        f'font-weight: 700; font-size: 0.85rem; color: #fff; '
+        f'background-color: {res.color};">'
+        f"{res.level.upper()} ({res.score}/100)</span>"
+    )
+    c_status.markdown(badge, unsafe_allow_html=True)
+    c_bar.progress(res.score / 100)
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Entropy", f"{res.entropy_bits} bits")
+    m2.metric("Classical Crack Time", res.classical_crack_time)
+    m3.metric("Quantum Grover Crack Time", res.quantum_crack_time)
+
+    with st.expander(
+        "Security Breakdown & Recommendations", expanded=(res.level != "Hard")
+    ):
+        for tip in res.feedback:
+            st.markdown(f"- {tip}")
+        if res.level == "Hard":
+            st.success(
+                "🔒 High-strength passphrase: safe against both classical and "
+                "quantum attacks."
+            )
+        elif res.level == "Medium":
+            st.info(
+                "⚠️ Moderate strength: acceptable, but consider adding more "
+                "length or symbols."
+            )
+        else:
+            st.warning(
+                "🚨 Weak passphrase: vulnerable to automated brute-force attacks."
+            )
+
+
+# ------------------------------------------------------------------
+# Header
+# ------------------------------------------------------------------
+active = st.session_state.get("keys")
+head_left, head_right = st.columns([4, 1], vertical_alignment="center")
+with head_left:
+    st.markdown(
+        '<div class="qt-hero"><h1>🔐 Qubit Talks</h1>'
+        "<p>Hide encrypted messages inside ordinary images, protected against "
+        "today's and tomorrow's computers.</p></div>",
+        unsafe_allow_html=True,
+    )
+with head_right:
+    if active:
+        pill = f'<span class="qt-pill qt-ok">🔓 Unlocked as <b>{escape(active.user_id)}</b></span>'
+    else:
+        pill = '<span class="qt-pill qt-lock">🔒 Locked: open the Keys tab</span>'
+    st.markdown(f'<div style="text-align:right">{pill}</div>', unsafe_allow_html=True)
+
+st.write("")
+tab_keys, tab_send, tab_receive, tab_quantum, tab_lab = st.tabs(
     [
-        "1️⃣ Create Cipher Vault",
-        "2️⃣ Unlock Cipher Vault",
-        "3️⃣ Quantum Risk & Benchmarks",
-        "4️⃣ Qiskit Lab",
+        ":material/key: Keys",
+        ":material/send: Send",
+        ":material/mark_email_read: Receive",
+        ":material/monitoring: Risk & Benchmarks",
+        ":material/science: Qiskit Lab",
     ]
 )
 
 # ==================================================================
-# TAB 1 — Create Cipher Vault
+# KEYS — create an identity, or open existing keys
 # ==================================================================
-with tab_create:
-    st.subheader("Create Cipher Vault")
-
-    uploaded = st.file_uploader("Upload PNG", type=["png"], key="create_png")
-
-    message = st.text_area("Enter hidden message", placeholder="Top-secret payload…")
-    col1, col2 = st.columns(2)
-    with col1:
-        sensitivity = st.select_slider(
-            "Sensitivity", options=["Low", "Medium", "High", "Critical"], value="High"
-        )
-    with col2:
-        retention = st.slider("Retention (days)", min_value=1, max_value=365, value=30)
-
-    mode = st.radio(
-        "Recipient mode",
-        ["Single recipient", "Multi-recipient (group)", "Broadcast (public)"],
-        horizontal=True,
+with tab_keys:
+    st.caption(
+        "Your keys are your identity. Create them once, save the files, and unlock them whenever you need to send or receive."
     )
+    left, right = st.columns(2, gap="large")
 
-    if st.button("🛡️ Protect & Embed", type="primary"):
-        if uploaded is None or not message:
-            st.warning("Upload a PNG and enter a message first.")
-        else:
-            protected_bytes = protect_png(uploaded.getvalue(), message, sensitivity, retention, mode)
+    with left, st.container(border=True):
+        step("New here", "Create your keys")
+        with st.form("create_form", border=False):
+            name = st.text_input("Your name", placeholder="e.g. alice")
+            pw = st.text_input("Passphrase (8+ characters)", type="password")
+            pw2 = st.text_input("Confirm passphrase", type="password")
+            if st.form_submit_button("Create my keys", type="primary"):
+                if pw != pw2:
+                    st.error("The passphrases do not match.")
+                else:
+                    try:
+                        private_file, public_file = generate(name.strip(), pw)
+                        st.session_state["new_keys"] = (
+                            private_file,
+                            public_file,
+                            name.strip(),
+                        )
+                        activate(private_file, pw)
+                    except KeyFileError as exc:
+                        st.error(str(exc))
+        if "new_keys" in st.session_state:
+            private_file, public_file, who = st.session_state["new_keys"]
+            st.success(f"Keys created and unlocked for **{who}**. Save both files now.")
+            c1, c2 = st.columns(2)
+            c1.download_button(
+                "Private key",
+                private_file,
+                f"{who}_private.qtkey",
+                "application/json",
+                icon=":material/lock:",
+                help="Secret. Protected by your passphrase.",
+                width="stretch",
+            )
+            c2.download_button(
+                "Public key",
+                public_file,
+                f"{who}_public.json",
+                "application/json",
+                icon=":material/share:",
+                help="Share this with people who want to message you.",
+                width="stretch",
+            )
+            st.caption(
+                "Keys are not stored on the server. If you leave this page without saving the private key, it cannot be recovered."
+            )
+
+    with right, st.container(border=True):
+        step("Already have keys", "Unlock keys or add contacts")
+        private = key_intake("keys", allow_private=True)
+        if private:
+            with st.form("unlock_form", border=False):
+                unlock_pw = st.text_input(
+                    "Passphrase for this private key", type="password"
+                )
+                if st.form_submit_button("Unlock", type="primary"):
+                    try:
+                        st.session_state.pop("new_keys", None)
+                        activate(private, unlock_pw)
+                    except KeyFileError as exc:
+                        st.error(str(exc))
+        if active:
             st.success(
-                f"✅ Embedded with HNDL hybrid scheme · sensitivity **{sensitivity}** · "
-                f"retention **{retention} days** · mode **{mode}**"
+                f"Unlocked as **{active.user_id}** · fingerprint `{active.fingerprint()}`"
             )
-            st.download_button(
-                "⬇️ Download protected image",
-                data=protected_bytes,
-                file_name="protected_cipher_vault.png",
-                mime="image/png",
-            )
+            if st.button("Lock", icon=":material/lock:"):
+                st.session_state.pop("keys", None)
+                st.session_state.pop("new_keys", None)
+                st.session_state.pop("protected", None)
+                st.rerun()
+
+    st.write("")
+    with st.container(border=True):
+        st.markdown("### 🛡️ Password & Passphrase Strength Analyzer")
+        st.caption(
+            "Analyze whether your passphrase is **Weak**, **Medium**, or **Hard**. "
+            "Evaluates entropy, brute-force resistance, and speedup from "
+            "Grover's quantum search algorithm."
+        )
+        test_pw = st.text_input(
+            "Test a password or passphrase",
+            type="password",
+            placeholder="Type any password or passphrase here...",
+            key="pw_analyzer_input",
+            help="Your password is analyzed entirely locally in your browser/session. "
+            "It is never stored or transmitted.",
+        )
+        if test_pw:
+            render_password_strength(test_pw)
+
+    contacts = st.session_state.get("contacts", {})
+    st.markdown("#### Contacts")
+    if not contacts:
+        st.info(
+            "No contacts yet. Drop someone's public key (.json) above to be able to message them."
+        )
+    for contact in list(contacts):
+        c_name, c_print = st.columns([3, 1], vertical_alignment="center")
+        c_name.markdown(
+            f"**{escape(contact)}** · fingerprint `{public_summary(contacts[contact])[1]}`"
+        )
+        if c_print.button("Remove", key=f"rm_{contact}", icon=":material/delete:"):
+            del contacts[contact]
+            st.rerun()
 
 # ==================================================================
-# TAB 2 — Unlock Cipher Vault
+# SEND — encrypt, sign and hide a message in an image
 # ==================================================================
-with tab_unlock:
-    st.subheader("Unlock Cipher Vault")
+with tab_send:
+    keys = st.session_state.get("keys")
+    contacts = st.session_state.get("contacts", {})
+    if keys is None:
+        st.info(
+            "Unlock your keys in the **Keys** tab first. They sign everything you send."
+        )
 
-    protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
+    with st.container(border=True):
+        step("Step 1", "Choose a cover image")
+        cover = st.file_uploader("PNG or JPG", type=["png", "jpg", "jpeg"], key="cover")
+        png = None
+        if cover is not None:
+            try:
+                png = to_png(cover)
+                st.image(png, width=320)
+                st.caption(
+                    f"This image can hide about {capacity(png):,} bytes. It will look unchanged."
+                )
+            except (OSError, MediaError):
+                st.error("That file could not be read as an image.")
 
-    if st.button("🔎 Extract & Verify"):
-        if protected is None:
-            st.warning("Upload a protected image first.")
+    with st.container(border=True):
+        step("Step 2", "Choose who can read it")
+        recipient_name = (
+            st.selectbox(
+                "Recipient", list(contacts), index=None, placeholder="Select a contact"
+            )
+            if contacts
+            else None
+        )
+        if not contacts:
+            st.info("No contacts yet. Add the recipient's public key below.")
+        with st.expander("Add a contact's public key"):
+            key_intake("send", allow_private=False)
+
+    with st.container(border=True):
+        step("Step 3", "Write your message")
+        message = st.text_area(
+            "Message",
+            placeholder="Your confidential message…",
+            label_visibility="collapsed",
+        )
+        with st.expander("Risk profile (preview)"):
+            st.select_slider(
+                "Sensitivity",
+                options=["Low", "Medium", "High", "Critical"],
+                value="High",
+            )
+            st.slider("Retention (days)", min_value=1, max_value=365, value=30)
+            st.caption(
+                "These feed the upcoming HNDL risk advisor. They do not change encryption yet."
+            )
+
+    if st.button(
+        "Encrypt and hide message",
+        type="primary",
+        icon=":material/enhanced_encryption:",
+    ):
+        st.session_state.pop("protected", None)
+        if keys is None or png is None or not recipient_name or not message:
+            st.warning(
+                "Unlock your keys, choose an image and a recipient, and write a message."
+            )
         else:
-            result = extract_and_verify(protected.getvalue())
+            try:
+                st.session_state["protected"] = protect_png(
+                    png, message, keys, contacts[recipient_name]
+                )
+                st.session_state["protected_for"] = recipient_name
+            except MediaError as exc:
+                st.error(f"{exc} Try a larger image or a shorter message.")
+            except CryptoError as exc:
+                st.error(str(exc))
+    if "protected" in st.session_state:
+        st.success(
+            f"Done. Only **{st.session_state['protected_for']}** can read this image, and it is signed by you."
+        )
+        st.caption(
+            f"{ALGORITHMS.key_establishment} · {ALGORITHMS.encryption} · {ALGORITHMS.signature} (Classical profile)"
+        )
+        st.download_button(
+            "Download protected image",
+            st.session_state["protected"],
+            "protected_qubit_talk.png",
+            "image/png",
+            icon=":material/download:",
+        )
 
-            # Signature status
-            if result["signature_valid"]:
-                st.success(f"✅ Signature valid — {result['algorithm']}")
-            else:
-                st.error("❌ Signature invalid")
+# ==================================================================
+# RECEIVE — verify the sender and decrypt
+# ==================================================================
+with tab_receive:
+    keys = st.session_state.get("keys")
+    contacts = st.session_state.get("contacts", {})
+    if keys is None:
+        st.info(
+            "Unlock your keys in the **Keys** tab first. They decrypt messages sent to you."
+        )
 
-            # Tamper detection
+    with st.container(border=True):
+        step("Step 1", "Upload the protected image")
+        protected = st.file_uploader("PNG", type=["png"], key="protected_png")
+
+    with st.container(border=True):
+        step("Step 2", "Who sent it?")
+        sender_name = (
+            st.selectbox(
+                "Sender", list(contacts), index=None, placeholder="Select a contact"
+            )
+            if contacts
+            else None
+        )
+        if not contacts:
+            st.info("No contacts yet. Add the sender's public key below.")
+        with st.expander("Add a contact's public key"):
+            key_intake("receive", allow_private=False)
+        if sender_name:
+            st.caption(
+                f"Their key fingerprint is `{public_summary(contacts[sender_name])[1]}`. Confirm it with them through another channel."
+            )
+
+    if st.button("Verify and decrypt", type="primary", icon=":material/lock_open:"):
+        if keys is None or protected is None or not sender_name:
+            st.warning("Unlock your keys, upload the image, and choose the sender.")
+        else:
+            result = extract_and_verify(
+                protected.getvalue(), keys, contacts[sender_name]
+            )
             if result["tamper_detected"]:
-                st.error("🚨 Tamper detected — image has been modified!")
-            else:
-                st.success("🛡️ No tampering detected")
-
-            # Decrypted message
-            with st.expander("🔓 Reveal decrypted message", expanded=True):
-                st.code(result["message"], language="text")
+                st.error("🚨 Tamper detected. The image or its contents were modified.")
+            if result["error"]:
+                st.error(result["error"])
+            if result["signature_valid"]:
+                ok1, ok2 = st.columns(2)
+                ok1.success(f"Signature verified · from **{sender_name}**")
+                ok2.success("Integrity intact · no tampering")
+                with st.container(border=True):
+                    st.markdown("**Decrypted message**")
+                    st.code(result["message"], language="text")
+                st.caption(result["algorithm"])
 
 # ==================================================================
 # TAB 3 — Quantum Risk & Benchmarks
@@ -129,7 +490,7 @@ with tab_quantum:
             "Hybrid-PQC (ms)": [5.4, 3.1, 2.9, 4.7],
         }
     )
-    st.dataframe(compare_df, use_container_width=True)
+    st.dataframe(compare_df, width="stretch")
     st.bar_chart(compare_df.set_index("Metric"))
 
     # Key / ciphertext / signature sizes
@@ -140,7 +501,7 @@ with tab_quantum:
             "Size (bytes)": [1184, 2400, 1088, 2420],
         }
     )
-    st.dataframe(sizes_df, use_container_width=True)
+    st.dataframe(sizes_df, width="stretch")
 
     # Latency charts
     st.markdown("### Latency charts (ms)")
@@ -165,10 +526,16 @@ with tab_quantum:
 with tab_lab:
     st.subheader("Qiskit Lab")
 
-    circuit_type = st.radio("Choose a circuit", ["Superposition (H)", "Entanglement (CNOT)"], horizontal=True)
+    circuit_type = st.radio(
+        "Choose a circuit",
+        ["Superposition (H)", "Entanglement (CNOT)"],
+        horizontal=True,
+    )
 
     if st.button("▶️ Run circuit", type="primary"):
-        result = run_circuit(circuit_type.lower().split(" ")[0].split("(")[0] or "superposition")
+        result = run_circuit(
+            circuit_type.lower().split(" ")[0].split("(")[0] or "superposition"
+        )
 
         counts = result["counts"]
         st.markdown("### Measurement counts")
