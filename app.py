@@ -1,14 +1,20 @@
 import io
 from html import escape
+from math import gcd
 
 import pandas as pd
 import streamlit as st
 from PIL import Image
 
+from crypto.envelope import EncryptionEnvelope
 from crypto.hybrid import ALGORITHMS, CryptoError, encrypt, verify_and_decrypt
 from crypto.keys import KeyFileError, classify, generate, public_summary, unlock
 from crypto.password import analyze_password_strength
+from src.advisor import DEFAULT_MIGRATION_YEARS, DEFAULT_THREAT_YEARS, SENSITIVITIES, advise
+from src.bench import run_benchmark
+from src.cbom import build_cbom
 from src.media import MediaError, capacity, embed, extract
+from src.qlab import find_order
 
 st.set_page_config(page_title="Qubit Talks", page_icon="🔐", layout="wide")
 
@@ -31,19 +37,14 @@ st.markdown(STYLE, unsafe_allow_html=True)
 # ------------------------------------------------------------------
 # Backends
 # ------------------------------------------------------------------
-def protect_png(
-    png_bytes: bytes, message: str, sender, recipient_public: bytes
-) -> bytes:
+def protect_png(png_bytes: bytes, message: str, sender, recipient_public: bytes) -> bytes:
     """Encrypt + sign the message, then hide the envelope in the PNG (LSB)."""
     return embed(png_bytes, encrypt(message.encode("utf-8"), sender, recipient_public))
 
 
 def extract_and_verify(png_bytes: bytes, recipient, sender_public: bytes) -> dict:
     """Extract the envelope, verify the signature, decrypt, and report tampering."""
-    algorithm = (
-        f"{ALGORITHMS.key_establishment} + {ALGORITHMS.encryption} + "
-        f"{ALGORITHMS.signature} (Classical)"
-    )
+    algorithm = f"{ALGORITHMS.key_establishment} + {ALGORITHMS.encryption} + {ALGORITHMS.signature} (Classical)"
     result = {
         "signature_valid": False,
         "tamper_detected": False,
@@ -57,23 +58,57 @@ def extract_and_verify(png_bytes: bytes, recipient, sender_public: bytes) -> dic
         result["error"] = str(exc)
         return result
     try:
-        result["message"] = verify_and_decrypt(
-            envelope, recipient, sender_public
-        ).decode("utf-8")
+        result["message"] = verify_and_decrypt(envelope, recipient, sender_public).decode("utf-8")
         result["signature_valid"] = True
+        result["envelope"] = EncryptionEnvelope.from_bytes(envelope)
     except CryptoError as exc:
         result["error"], result["tamper_detected"] = str(exc), exc.tampered
     return result
 
 
-def run_circuit(circuit_type: str) -> dict:
-    """Run a Qiskit circuit. (STUB)"""
-    counts = (
-        {"00": 512, "11": 512}
-        if circuit_type == "entanglement"
-        else {"0": 524, "1": 500}
-    )
-    return {"counts": counts, "shots": 1024}
+def cbom_for(alg) -> dict:
+    """CBOM for the algorithms that actually protected this message."""
+    return build_cbom(alg.key_establishment, alg.encryption, alg.signature)
+
+
+# Plain-language meaning of each envelope field (crypto/envelope.py).
+ENVELOPE_FIELDS = {
+    "version": "Format edition; only 1.0 is accepted.",
+    "sender_id / recipient_id": "From and To. Signed, so they cannot be swapped.",
+    "algorithms": "Key setup, cipher and signature used. Signed, so no silent downgrade.",
+    "ephemeral_public_key": "Alice's one-time X25519 public key.",
+    "kem_ciphertext": "ML-KEM output (post-quantum half). Empty in the classical profile.",
+    "aes_gcm_nonce": "12-byte one-time number; never reused with a key.",
+    "encrypted_payload": "The message, AES-256-GCM encrypted, plus its tamper tag.",
+    "signature": "Sender's signature over every field above.",
+}
+
+
+def envelope_table(env: EncryptionEnvelope) -> pd.DataFrame:
+    a = env.algorithms
+    values = [
+        env.version,
+        f"{env.sender_id} → {env.recipient_id}",
+        f"{a.key_establishment} · {a.encryption} · {a.signature}",
+        f"{len(env.ephemeral_public_key)} bytes",
+        f"{len(env.kem_ciphertext)} bytes",
+        f"{len(env.aes_gcm_nonce)} bytes",
+        f"{len(env.encrypted_payload)} bytes",
+        f"{len(env.signature)} bytes",
+    ]
+    rows = zip(ENVELOPE_FIELDS, values, ENVELOPE_FIELDS.values(), strict=True)
+    return pd.DataFrame(rows, columns=["Field", "This message", "Meaning"])
+
+
+@st.cache_data(show_spinner="Measuring the real primitives…")
+def cached_benchmark() -> dict:
+    return run_benchmark()
+
+
+@st.cache_data(show_spinner="Running the circuit on Qiskit Aer…")
+def cached_order(a: int):
+    r = find_order(a, 15)
+    return r.counts, r.order, r.factors, str(r.circuit.draw(output="text", fold=-1))
 
 
 # ------------------------------------------------------------------
@@ -123,9 +158,7 @@ def key_intake(prefix: str, allow_private: bool):
             elif kind == "private" and allow_private:
                 private = raw
             elif kind == "private":
-                st.warning(
-                    f"{f.name} is a private key. Keep it secret and open it in the Keys tab."
-                )
+                st.warning(f"{f.name} is a private key. Keep it secret and open it in the Keys tab.")
             else:
                 st.error(f"{f.name} is not a Qubit Talks key file.")
         except KeyFileError as exc:
@@ -147,7 +180,7 @@ def render_password_strength(password: str) -> None:
     c_status, c_bar = st.columns([1, 3], vertical_alignment="center")
     badge = (
         '<span style="display:inline-block; padding: 4px 14px; border-radius: 999px; '
-        f'font-weight: 700; font-size: 0.85rem; color: #fff; '
+        f"font-weight: 700; font-size: 0.85rem; color: #fff; "
         f'background-color: {res.color};">'
         f"{res.level.upper()} ({res.score}/100)</span>"
     )
@@ -159,25 +192,15 @@ def render_password_strength(password: str) -> None:
     m2.metric("Classical Crack Time", res.classical_crack_time)
     m3.metric("Quantum Grover Crack Time", res.quantum_crack_time)
 
-    with st.expander(
-        "Security Breakdown & Recommendations", expanded=(res.level != "Hard")
-    ):
+    with st.expander("Security Breakdown & Recommendations", expanded=(res.level != "Hard")):
         for tip in res.feedback:
             st.markdown(f"- {tip}")
         if res.level == "Hard":
-            st.success(
-                "🔒 High-strength passphrase: safe against both classical and "
-                "quantum attacks."
-            )
+            st.success("🔒 High-strength passphrase: safe against both classical and quantum attacks.")
         elif res.level == "Medium":
-            st.info(
-                "⚠️ Moderate strength: acceptable, but consider adding more "
-                "length or symbols."
-            )
+            st.info("⚠️ Moderate strength: acceptable, but consider adding more length or symbols.")
         else:
-            st.warning(
-                "🚨 Weak passphrase: vulnerable to automated brute-force attacks."
-            )
+            st.warning("🚨 Weak passphrase: vulnerable to automated brute-force attacks.")
 
 
 # ------------------------------------------------------------------
@@ -198,6 +221,25 @@ with head_right:
     else:
         pill = '<span class="qt-pill qt-lock">🔒 Locked: open the Keys tab</span>'
     st.markdown(f'<div style="text-align:right">{pill}</div>', unsafe_allow_html=True)
+
+PIPELINE = [
+    ("HNDL risk advisor", "✅", "Mosca's inequality, assumptions shown"),
+    ("Keys (X25519 + Ed25519)", "✅", "Passphrase-protected key files"),
+    ("Key setup + HKDF + AES-256-GCM", "✅", "Classical profile"),
+    ("Signature (Ed25519)", "✅", "Covers every envelope field"),
+    ("PNG LSB embed / extract", "✅", "Hiding, not security"),
+    ("CBOM", "✅", "pqc_ready computed per message"),
+    ("Qiskit order-finding lab", "✅", "Real circuit on Aer, N = 15"),
+    ("Benchmarks", "✅", "Measured on this machine"),
+    ("ML-KEM-768 + ML-DSA-65", "⏳", "Next: hybrid PQC profile"),
+]
+with st.sidebar:
+    st.header("What runs in this build")
+    for stage, status, note in PIPELINE:
+        st.markdown(f"{status} **{stage}**  \n<small>{note}</small>", unsafe_allow_html=True)
+    st.caption(
+        "Messages use the classical profile until the ML-KEM / ML-DSA step lands. Nothing post-quantum is claimed before then."
+    )
 
 st.write("")
 tab_keys, tab_send, tab_receive, tab_quantum, tab_lab = st.tabs(
@@ -270,9 +312,7 @@ with tab_keys:
         private = key_intake("keys", allow_private=True)
         if private:
             with st.form("unlock_form", border=False):
-                unlock_pw = st.text_input(
-                    "Passphrase for this private key", type="password"
-                )
+                unlock_pw = st.text_input("Passphrase for this private key", type="password")
                 if st.form_submit_button("Unlock", type="primary"):
                     try:
                         st.session_state.pop("new_keys", None)
@@ -280,9 +320,7 @@ with tab_keys:
                     except KeyFileError as exc:
                         st.error(str(exc))
         if active:
-            st.success(
-                f"Unlocked as **{active.user_id}** · fingerprint `{active.fingerprint()}`"
-            )
+            st.success(f"Unlocked as **{active.user_id}** · fingerprint `{active.fingerprint()}`")
             if st.button("Lock", icon=":material/lock:"):
                 st.session_state.pop("keys", None)
                 st.session_state.pop("new_keys", None)
@@ -311,14 +349,10 @@ with tab_keys:
     contacts = st.session_state.get("contacts", {})
     st.markdown("#### Contacts")
     if not contacts:
-        st.info(
-            "No contacts yet. Drop someone's public key (.json) above to be able to message them."
-        )
+        st.info("No contacts yet. Drop someone's public key (.json) above to be able to message them.")
     for contact in list(contacts):
         c_name, c_print = st.columns([3, 1], vertical_alignment="center")
-        c_name.markdown(
-            f"**{escape(contact)}** · fingerprint `{public_summary(contacts[contact])[1]}`"
-        )
+        c_name.markdown(f"**{escape(contact)}** · fingerprint `{public_summary(contacts[contact])[1]}`")
         if c_print.button("Remove", key=f"rm_{contact}", icon=":material/delete:"):
             del contacts[contact]
             st.rerun()
@@ -330,9 +364,7 @@ with tab_send:
     keys = st.session_state.get("keys")
     contacts = st.session_state.get("contacts", {})
     if keys is None:
-        st.info(
-            "Unlock your keys in the **Keys** tab first. They sign everything you send."
-        )
+        st.info("Unlock your keys in the **Keys** tab first. They sign everything you send.")
 
     with st.container(border=True):
         step("Step 1", "Choose a cover image")
@@ -342,20 +374,14 @@ with tab_send:
             try:
                 png = to_png(cover)
                 st.image(png, width=320)
-                st.caption(
-                    f"This image can hide about {capacity(png):,} bytes. It will look unchanged."
-                )
+                st.caption(f"This image can hide about {capacity(png):,} bytes. It will look unchanged.")
             except (OSError, MediaError):
                 st.error("That file could not be read as an image.")
 
     with st.container(border=True):
         step("Step 2", "Choose who can read it")
         recipient_name = (
-            st.selectbox(
-                "Recipient", list(contacts), index=None, placeholder="Select a contact"
-            )
-            if contacts
-            else None
+            st.selectbox("Recipient", list(contacts), index=None, placeholder="Select a contact") if contacts else None
         )
         if not contacts:
             st.info("No contacts yet. Add the recipient's public key below.")
@@ -369,15 +395,17 @@ with tab_send:
             placeholder="Your confidential message…",
             label_visibility="collapsed",
         )
-        with st.expander("Risk profile (preview)"):
-            st.select_slider(
-                "Sensitivity",
-                options=["Low", "Medium", "High", "Critical"],
-                value="High",
-            )
-            st.slider("Retention (days)", min_value=1, max_value=365, value=30)
+    with st.container(border=True):
+        step("Step 4", "How long must it stay secret?")
+        r1, r2 = st.columns(2)
+        sensitivity = r1.select_slider("Sensitivity", options=list(SENSITIVITIES), value="High")
+        retention = r2.slider("Keep secret for (years)", min_value=1, max_value=30, value=5)
+        advice = advise(sensitivity, retention)
+        (st.warning if advice.at_risk else st.success)(f"**Recommended: {advice.profile}.** {advice.reason}")
+        if advice.profile != "Classical":
             st.caption(
-                "These feed the upcoming HNDL risk advisor. They do not change encryption yet."
+                "This build encrypts with the classical profile. The ML-KEM / ML-DSA upgrade is the next step; "
+                "see the Risk tab for why it matters."
             )
 
     if st.button(
@@ -387,23 +415,17 @@ with tab_send:
     ):
         st.session_state.pop("protected", None)
         if keys is None or png is None or not recipient_name or not message:
-            st.warning(
-                "Unlock your keys, choose an image and a recipient, and write a message."
-            )
+            st.warning("Unlock your keys, choose an image and a recipient, and write a message.")
         else:
             try:
-                st.session_state["protected"] = protect_png(
-                    png, message, keys, contacts[recipient_name]
-                )
+                st.session_state["protected"] = protect_png(png, message, keys, contacts[recipient_name])
                 st.session_state["protected_for"] = recipient_name
             except MediaError as exc:
                 st.error(f"{exc} Try a larger image or a shorter message.")
             except CryptoError as exc:
                 st.error(str(exc))
     if "protected" in st.session_state:
-        st.success(
-            f"Done. Only **{st.session_state['protected_for']}** can read this image, and it is signed by you."
-        )
+        st.success(f"Done. Only **{st.session_state['protected_for']}** can read this image, and it is signed by you.")
         st.caption(
             f"{ALGORITHMS.key_establishment} · {ALGORITHMS.encryption} · {ALGORITHMS.signature} (Classical profile)"
         )
@@ -414,6 +436,11 @@ with tab_send:
             "image/png",
             icon=":material/download:",
         )
+        sent = EncryptionEnvelope.from_bytes(extract(st.session_state["protected"]))
+        with st.expander("What is hidden inside the image (the envelope)"):
+            st.dataframe(envelope_table(sent), hide_index=True, width="stretch")
+        with st.expander("CBOM: the ingredients label for this message"):
+            st.json(cbom_for(sent.algorithms))
 
 # ==================================================================
 # RECEIVE — verify the sender and decrypt
@@ -422,9 +449,7 @@ with tab_receive:
     keys = st.session_state.get("keys")
     contacts = st.session_state.get("contacts", {})
     if keys is None:
-        st.info(
-            "Unlock your keys in the **Keys** tab first. They decrypt messages sent to you."
-        )
+        st.info("Unlock your keys in the **Keys** tab first. They decrypt messages sent to you.")
 
     with st.container(border=True):
         step("Step 1", "Upload the protected image")
@@ -433,11 +458,7 @@ with tab_receive:
     with st.container(border=True):
         step("Step 2", "Who sent it?")
         sender_name = (
-            st.selectbox(
-                "Sender", list(contacts), index=None, placeholder="Select a contact"
-            )
-            if contacts
-            else None
+            st.selectbox("Sender", list(contacts), index=None, placeholder="Select a contact") if contacts else None
         )
         if not contacts:
             st.info("No contacts yet. Add the sender's public key below.")
@@ -452,9 +473,7 @@ with tab_receive:
         if keys is None or protected is None or not sender_name:
             st.warning("Unlock your keys, upload the image, and choose the sender.")
         else:
-            result = extract_and_verify(
-                protected.getvalue(), keys, contacts[sender_name]
-            )
+            result = extract_and_verify(protected.getvalue(), keys, contacts[sender_name])
             if result["tamper_detected"]:
                 st.error("🚨 Tamper detected. The image or its contents were modified.")
             if result["error"]:
@@ -467,99 +486,87 @@ with tab_receive:
                     st.markdown("**Decrypted message**")
                     st.code(result["message"], language="text")
                 st.caption(result["algorithm"])
+                with st.expander("Envelope and CBOM"):
+                    st.dataframe(envelope_table(result["envelope"]), hide_index=True, width="stretch")
+                    st.json(cbom_for(result["envelope"].algorithms))
 
 # ==================================================================
-# TAB 3 — Quantum Risk & Benchmarks
+# RISK & BENCHMARKS — why this is necessary, and what it costs
 # ==================================================================
 with tab_quantum:
-    st.subheader("Quantum Risk & Benchmarks")
+    st.subheader("Why protect against quantum computers today?")
+    st.markdown(
+        "**Harvest Now, Decrypt Later (HNDL)** is a threat: attackers record encrypted data today and "
+        "decrypt it once a large quantum computer can break RSA and elliptic-curve keys. "
+        "Data that must stay secret for years is already at risk."
+    )
 
-    with st.expander("What is HNDL?", expanded=True):
-        st.markdown(
-            "**HNDL** is a hybrid post-quantum scheme: classical AES-GCM for bulk "
-            "speed + lattice-based (e.g., Kyber/Dilithium-style) primitives for "
-            "quantum resistance, plus a signature for tamper detection."
+    with st.container(border=True):
+        st.markdown("**Mosca's inequality:** at risk if *years secret* + *years to migrate* > *years until the threat*")
+        c1, c2, c3, c4 = st.columns(4)
+        m_sens = c1.select_slider("Sensitivity", options=list(SENSITIVITIES), value="High", key="m_sens")
+        m_x = c2.number_input("Years secret (x)", 1, 50, 5)
+        m_y = c3.number_input("Years to migrate (y)", 0, 20, int(DEFAULT_MIGRATION_YEARS))
+        m_z = c4.number_input("Years until threat (z)", 1, 50, int(DEFAULT_THREAT_YEARS))
+        m = advise(m_sens, m_x, m_y, m_z)
+        st.metric(
+            "x + y vs z",
+            f"{m.exposure_years:g} vs {m.threat_years:g} years",
+            "at risk" if m.at_risk else "safe",
+            delta_color="inverse" if m.at_risk else "normal",
         )
+        st.markdown(f"**{m.profile}.** {m.reason}")
+        st.caption("y and z are assumptions you can change, not facts. Source: Mosca's inequality (arXiv 2603.06969).")
 
-    # Classical vs Hybrid comparison
-    st.markdown("### Classical vs Hybrid comparison")
-    compare_df = pd.DataFrame(
-        {
-            "Metric": ["Key gen", "Encrypt", "Decrypt", "Sign/Verify"],
-            "Classical (ms)": [2.1, 0.8, 0.6, 1.2],
-            "Hybrid-PQC (ms)": [5.4, 3.1, 2.9, 4.7],
-        }
+    st.subheader("Classical vs Hybrid: measured cost")
+    st.caption(
+        "Classical = X25519 + Ed25519. Hybrid = X25519 + ML-KEM-768 + ML-DSA-65. "
+        "Real primitives from the `cryptography` library, timed on this machine (median)."
     )
-    st.dataframe(compare_df, width="stretch")
-    st.bar_chart(compare_df.set_index("Metric"))
-
-    # Key / ciphertext / signature sizes
-    st.markdown("### Key, ciphertext, and signature sizes")
-    sizes_df = pd.DataFrame(
-        {
-            "Artifact": ["Public key", "Private key", "Ciphertext", "Signature"],
-            "Size (bytes)": [1184, 2400, 1088, 2420],
-        }
-    )
-    st.dataframe(sizes_df, width="stretch")
-
-    # Latency charts
-    st.markdown("### Latency charts (ms)")
-    lat_df = pd.DataFrame(
-        {
-            "Operation": ["Key gen", "Encrypt", "Decrypt", "Sign"],
-            "CPU": [5.4, 3.1, 2.9, 4.7],
-            "GPU": [2.0, 1.2, 1.1, 1.8],
-        }
-    )
-    st.bar_chart(lat_df.set_index("Operation"))
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Public key", "1,184 B", "+38% vs RSA")
-    m2.metric("Ciphertext", "1,088 B", "+42% vs RSA")
-    m3.metric("Signature", "2,420 B", "NIST L3")
-    m4.metric("Quantum safe", "Yes", "NIST FIPS 203/204")
+    bench = cached_benchmark()
+    times = pd.DataFrame(bench["timings"]).set_index("operation")
+    times.columns = ["Classical (ms)", "Hybrid (ms)"]
+    st.bar_chart(times, horizontal=True, stack=False)
+    sizes = pd.DataFrame(bench["sizes"]).set_index("artifact")
+    sizes.columns = ["Classical (bytes)", "Hybrid (bytes)"]
+    st.dataframe(sizes, width="stretch")
+    st.caption("Hybrid costs more bytes and a little more time, but a quantum attacker must break both halves.")
 
 # ==================================================================
-# TAB 4 — Qiskit Lab
+# QISKIT LAB — the quantum step that breaks RSA and ECC
 # ==================================================================
 with tab_lab:
-    st.subheader("Qiskit Lab")
-
-    circuit_type = st.radio(
-        "Choose a circuit",
-        ["Superposition (H)", "Entanglement (CNOT)"],
-        horizontal=True,
+    st.subheader("Order-finding: the quantum heart of Shor's algorithm")
+    st.markdown(
+        "RSA and elliptic-curve keys are safe only because factoring is slow. Factoring reduces to "
+        "**order-finding**: the smallest *r* with *a^r mod N = 1*. A quantum computer finds *r* quickly; "
+        "the factors then follow from ordinary arithmetic. Lattice problems (ML-KEM, ML-DSA) have no such "
+        "repeating pattern, which is why they are the post-quantum answer."
     )
+    a = st.select_slider("Base a (N = 15)", options=[2, 4, 7, 8, 11, 13, 14], value=7)
+    counts, order, factors, drawing = cached_order(a)
 
-    if st.button("▶️ Run circuit", type="primary"):
-        result = run_circuit(
-            circuit_type.lower().split(" ")[0].split("(")[0] or "superposition"
+    left, right = st.columns([3, 2])
+    with left:
+        st.markdown("**1. Measure the counting register** (1024 shots spread over the peaks)")
+        st.bar_chart(pd.DataFrame({"Count": counts}).sort_index())
+    with right:
+        st.markdown("**2. Read the period from the peaks**")
+        st.markdown(
+            f"Peaks at multiples of 8 / r, so **r = {order}** (check: {a}^{order} mod 15 = {pow(a, order, 15)})."
         )
-
-        counts = result["counts"]
-        st.markdown("### Measurement counts")
-        st.bar_chart(pd.DataFrame({"Count": counts}))
-
-        if circuit_type.startswith("Entanglement"):
+        st.markdown("**3. Factor N with gcd**")
+        if factors:
+            h = pow(a, order // 2)
             st.markdown(
-                """
-                **Why it matters:** two qubits are entangled — measuring one instantly
-                correlates with the other. Quantum computers can hold exponentially many
-                correlated states, which is what breaks RSA/ECC via Shor's algorithm.
-                """
+                f"gcd({h} − 1, 15) = **{gcd(h - 1, 15)}**, gcd({h} + 1, 15) = **{gcd(h + 1, 15)}** → 15 = {factors[0]} × {factors[1]}"
             )
         else:
-            st.markdown(
-                """
-                **Why it matters:** a Hadamard gate puts a qubit in a superposition
-                of |0⟩ and |1⟩. This parallel state exploration is why quantum
-                attacks are fast — and why we need **PQC** (post-quantum cryptography).
-                """
-            )
+            st.markdown("This base gives no factors (odd order or trivial gcd); Shor would retry with another base.")
 
-        st.info(
-            "💡 **Why PQC matters:** Shor's algorithm on a large-enough quantum computer "
-            "can factor RSA keys and break ECC in polynomial time. HNDL uses "
-            "lattice-based primitives that resist both classical and quantum attacks."
-        )
+    with st.expander("The circuit (3 counting qubits + 4 work qubits)"):
+        st.code(drawing, language="text")
+    st.info(
+        "Educational scale: a simulator handles N = 15, while real RSA keys need thousands of error-corrected "
+        "qubits. The point is the method: once such machines exist, today's recorded traffic can be decrypted."
+    )
