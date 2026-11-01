@@ -86,3 +86,35 @@ def unlock(private_file: bytes, passphrase: str) -> UnlockedKeys:
         raise KeyFileError(
             "Wrong passphrase or not a valid Qubit Talks key file."
         ) from exc
+
+
+def classify(key_file: bytes) -> str | None:
+    """Return "private", "public", or None for an uploaded key file."""
+    try:
+        data = json.loads(key_file.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    if "x25519_pem" in data and "ed25519_pem" in data:
+        return "private"
+    if "x25519_pub" in data and "ed25519_pub" in data and "id" in data:
+        return "public"
+    return None
+
+
+def public_summary(public_file: bytes) -> tuple[str, str]:
+    """Return (name, fingerprint) of a public key file, validating its contents."""
+    try:
+        data = json.loads(public_file.decode("utf-8"))
+        for field in ("x25519_pub", "ed25519_pub"):
+            if len(base64.b64decode(data[field], validate=True)) != 32:
+                raise ValueError(field)
+        canonical = json.dumps(
+            {k: data[k] for k in ("id", "x25519_pub", "ed25519_pub")},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (ValueError, KeyError, TypeError, UnicodeDecodeError) as exc:
+        raise KeyFileError("Not a valid Qubit Talks public key file.") from exc
+    return str(data["id"]), hashlib.sha256(canonical).hexdigest()[:16]

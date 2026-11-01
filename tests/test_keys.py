@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from crypto.keys import KeyFileError, generate, unlock
+from crypto.keys import KeyFileError, classify, generate, public_summary, unlock
 
 
 class TestKeys(unittest.TestCase):
@@ -31,6 +31,18 @@ class TestKeys(unittest.TestCase):
             unlock(private, "wrong passphrase")
         with self.assertRaises(KeyFileError):
             unlock(b"not json", "correct horse")
+
+    def test_classify_and_public_summary(self):
+        private, public = generate("alice", "correct horse")
+        self.assertEqual(classify(private), "private")
+        self.assertEqual(classify(public), "public")
+        self.assertIsNone(classify(b"hello"))
+        self.assertIsNone(classify(b"[1, 2]"))
+        name, fingerprint = public_summary(public)
+        self.assertEqual(name, "alice")
+        self.assertEqual(fingerprint, unlock(private, "correct horse").fingerprint())
+        with self.assertRaises(KeyFileError):
+            public_summary(b'{"id": "x", "x25519_pub": "AAAA", "ed25519_pub": "AAAA"}')
 
 
 if __name__ == "__main__":
