@@ -1,32 +1,45 @@
-import io
-
 import pandas as pd
 import streamlit as st
-from PIL import Image
+
+from src.media import MediaError, embed, extract
 
 st.set_page_config(page_title="Cipher Vault — PQC", layout="wide")
 st.title("🔐 Cipher Vault — Hybrid Post-Quantum Vault (HNDL)")
 
+
 # ------------------------------------------------------------------
 # Placeholder backends — replace with real implementations
 # ------------------------------------------------------------------
-def protect_png(png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str) -> bytes:
-    """Embed a hidden message + signature into a PNG. (STUB)"""
-    return png_bytes
+def protect_png(
+    png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str
+) -> bytes:
+    """Embed the message in a PNG via LSB.
+
+    TODO(Melvin's envelope): the payload is currently PLAINTEXT, unsigned.
+    """
+    return embed(png_bytes, message.encode("utf-8"))
+
 
 def extract_and_verify(png_bytes: bytes) -> dict:
-    """Extract hidden message, verify signature, run tamper detection. (STUB)"""
+    """Extract the hidden message. Signature/tamper checks await the envelope."""
     return {
-        "signature_valid": True,
-        "message": "Hidden message extracted here",
-        "tamper_detected": False,
-        "algorithm": "HNDL-Dilithium hybrid",
+        "signature_valid": None,  # None = not checked (no crypto yet)
+        "message": extract(png_bytes).decode("utf-8", errors="replace"),
+        "tamper_detected": None,
+        "algorithm": "none (plaintext LSB placeholder)",
     }
+
 
 def run_circuit(circuit_type: str) -> dict:
     """Run a Qiskit circuit. (STUB)"""
-    counts = {"00": 512, "11": 512} if circuit_type == "entanglement" else {"0": 524, "1": 500}
+    counts = (
+        {"00": 512, "11": 512}
+        if circuit_type == "entanglement"
+        else {"0": 524, "1": 500}
+    )
     return {"counts": counts, "shots": 1024}
+
+
 # ------------------------------------------------------------------
 
 tab_create, tab_unlock, tab_quantum, tab_lab = st.tabs(
@@ -65,10 +78,16 @@ with tab_create:
         if uploaded is None or not message:
             st.warning("Upload a PNG and enter a message first.")
         else:
-            protected_bytes = protect_png(uploaded.getvalue(), message, sensitivity, retention, mode)
-            st.success(
-                f"✅ Embedded with HNDL hybrid scheme · sensitivity **{sensitivity}** · "
-                f"retention **{retention} days** · mode **{mode}**"
+            try:
+                protected_bytes = protect_png(
+                    uploaded.getvalue(), message, sensitivity, retention, mode
+                )
+            except MediaError as exc:
+                st.error(f"❌ {exc}")
+                st.stop()
+            st.warning(
+                "Message embedded as **plaintext** (no encryption yet — "
+                "waiting on the crypto envelope). Do not use for real secrets."
             )
             st.download_button(
                 "⬇️ Download protected image",
@@ -83,28 +102,31 @@ with tab_create:
 with tab_unlock:
     st.subheader("Unlock Cipher Vault")
 
-    protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
+    protected = st.file_uploader(
+        "Upload protected image", type=["png"], key="unlock_png"
+    )
 
     if st.button("🔎 Extract & Verify"):
         if protected is None:
             st.warning("Upload a protected image first.")
         else:
-            result = extract_and_verify(protected.getvalue())
+            try:
+                result = extract_and_verify(protected.getvalue())
+            except MediaError as exc:
+                st.error(f"❌ {exc}")
+                st.stop()
 
-            # Signature status
-            if result["signature_valid"]:
+            if result["signature_valid"] is None:
+                st.info("ℹ️ Signature and tamper checks not available yet.")
+            elif result["signature_valid"]:
                 st.success(f"✅ Signature valid — {result['algorithm']}")
             else:
                 st.error("❌ Signature invalid")
 
-            # Tamper detection
             if result["tamper_detected"]:
                 st.error("🚨 Tamper detected — image has been modified!")
-            else:
-                st.success("🛡️ No tampering detected")
 
-            # Decrypted message
-            with st.expander("🔓 Reveal decrypted message", expanded=True):
+            with st.expander("🔓 Extracted message", expanded=True):
                 st.code(result["message"], language="text")
 
 # ==================================================================
@@ -165,10 +187,16 @@ with tab_quantum:
 with tab_lab:
     st.subheader("Qiskit Lab")
 
-    circuit_type = st.radio("Choose a circuit", ["Superposition (H)", "Entanglement (CNOT)"], horizontal=True)
+    circuit_type = st.radio(
+        "Choose a circuit",
+        ["Superposition (H)", "Entanglement (CNOT)"],
+        horizontal=True,
+    )
 
     if st.button("▶️ Run circuit", type="primary"):
-        result = run_circuit(circuit_type.lower().split(" ")[0].split("(")[0] or "superposition")
+        result = run_circuit(
+            circuit_type.lower().split(" ")[0].split("(")[0] or "superposition"
+        )
 
         counts = result["counts"]
         st.markdown("### Measurement counts")
