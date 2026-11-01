@@ -4,6 +4,7 @@ Standards: X25519 (RFC 7748), Ed25519 (RFC 8032), PKCS#8 PEM encryption (RFC 595
 Classical keys only; ML-KEM / ML-DSA keys join here once liboqs is confirmed.
 Private keys are stored encrypted with the user's passphrase and never logged.
 """
+
 from __future__ import annotations
 
 import base64
@@ -18,7 +19,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 MIN_PASSPHRASE_CHARS = 8
 
 
-class KeyError_(ValueError):
+class KeyFileError(ValueError):
     """Raised for weak passphrases, wrong passphrases, or malformed key files."""
 
 
@@ -41,23 +42,35 @@ def _raw_pub(key) -> str:
 
 
 def _public_json(user_id: str, x_priv, e_priv) -> bytes:
-    data = {"id": user_id, "x25519_pub": _raw_pub(x_priv), "ed25519_pub": _raw_pub(e_priv)}
+    data = {
+        "id": user_id,
+        "x25519_pub": _raw_pub(x_priv),
+        "ed25519_pub": _raw_pub(e_priv),
+    }
     return json.dumps(data, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
 def _pem(key, passphrase: str) -> str:
     enc = ser.BestAvailableEncryption(passphrase.encode("utf-8"))
-    return key.private_bytes(ser.Encoding.PEM, ser.PrivateFormat.PKCS8, enc).decode("ascii")
+    return key.private_bytes(ser.Encoding.PEM, ser.PrivateFormat.PKCS8, enc).decode(
+        "ascii"
+    )
 
 
 def generate(user_id: str, passphrase: str) -> tuple[bytes, bytes]:
     """Return (private_key_file, public_key_file) bytes for a new identity."""
     if not user_id.strip():
-        raise KeyError_("Name is required.")
+        raise KeyFileError("Name is required.")
     if len(passphrase) < MIN_PASSPHRASE_CHARS:
-        raise KeyError_(f"Passphrase must be at least {MIN_PASSPHRASE_CHARS} characters.")
+        raise KeyFileError(
+            f"Passphrase must be at least {MIN_PASSPHRASE_CHARS} characters."
+        )
     x_priv, e_priv = X25519PrivateKey.generate(), Ed25519PrivateKey.generate()
-    private = {"id": user_id, "x25519_pem": _pem(x_priv, passphrase), "ed25519_pem": _pem(e_priv, passphrase)}
+    private = {
+        "id": user_id,
+        "x25519_pem": _pem(x_priv, passphrase),
+        "ed25519_pem": _pem(e_priv, passphrase),
+    }
     return json.dumps(private).encode("utf-8"), _public_json(user_id, x_priv, e_priv)
 
 
@@ -70,4 +83,6 @@ def unlock(private_file: bytes, passphrase: str) -> UnlockedKeys:
         e_priv = ser.load_pem_private_key(data["ed25519_pem"].encode("ascii"), pw)
         return UnlockedKeys(str(data["id"]), x_priv, e_priv)
     except (ValueError, KeyError, TypeError) as exc:
-        raise KeyError_("Wrong passphrase or not a valid Qubit Talks key file.") from exc
+        raise KeyFileError(
+            "Wrong passphrase or not a valid Qubit Talks key file."
+        ) from exc

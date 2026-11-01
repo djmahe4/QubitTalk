@@ -4,7 +4,9 @@ import pandas as pd
 import streamlit as st
 from PIL import Image
 
-from crypto.keys import KeyError_, generate, unlock
+from crypto.hybrid import ALGORITHMS, CryptoError, encrypt, verify_and_decrypt
+from crypto.keys import KeyFileError, generate, unlock
+from src.media import MediaError, embed, extract
 
 st.set_page_config(page_title="Qubit Talks — PQC", layout="wide")
 st.title("🔐 Qubit Talks — Hybrid Post-Quantum Messaging (HNDL)")
@@ -12,18 +14,27 @@ st.title("🔐 Qubit Talks — Hybrid Post-Quantum Messaging (HNDL)")
 # ------------------------------------------------------------------
 # Placeholder backends — replace with real implementations
 # ------------------------------------------------------------------
-def protect_png(png_bytes: bytes, message: str, sensitivity: str, retention: int, mode: str) -> bytes:
-    """Embed a hidden message + signature into a PNG. (STUB)"""
-    return png_bytes
+def protect_png(png_bytes: bytes, message: str, sender, recipient_public: bytes) -> bytes:
+    """Encrypt + sign the message, then hide the envelope in the PNG (LSB)."""
+    return embed(png_bytes, encrypt(message.encode("utf-8"), sender, recipient_public))
 
-def extract_and_verify(png_bytes: bytes) -> dict:
-    """Extract hidden message, verify signature, run tamper detection. (STUB)"""
-    return {
-        "signature_valid": True,
-        "message": "Hidden message extracted here",
-        "tamper_detected": False,
-        "algorithm": "HNDL-Dilithium hybrid",
-    }
+
+def extract_and_verify(png_bytes: bytes, recipient, sender_public: bytes) -> dict:
+    """Extract the envelope, verify the signature, decrypt, and report tampering."""
+    algorithm = f"{ALGORITHMS.key_establishment} + {ALGORITHMS.encryption} + {ALGORITHMS.signature} (Classical)"
+    result = {"signature_valid": False, "tamper_detected": False, "message": "", "algorithm": algorithm, "error": None}
+    try:
+        envelope = extract(png_bytes)
+    except MediaError as exc:
+        result["error"] = str(exc)
+        return result
+    try:
+        result["message"] = verify_and_decrypt(envelope, recipient, sender_public).decode("utf-8")
+        result["signature_valid"] = True
+    except CryptoError as exc:
+        result["error"], result["tamper_detected"] = str(exc), exc.tampered
+    return result
+
 
 def run_circuit(circuit_type: str) -> dict:
     """Run a Qiskit circuit. (STUB)"""
@@ -56,7 +67,7 @@ with tab_keys:
             try:
                 st.session_state["new_keys"] = generate(key_name, key_pass)
                 st.session_state["new_keys_name"] = key_name
-            except KeyError_ as exc:
+            except KeyFileError as exc:
                 st.session_state.pop("new_keys", None)
                 st.error(str(exc))
         if "new_keys" in st.session_state:
@@ -78,7 +89,7 @@ with tab_keys:
             else:
                 try:
                     st.session_state["keys"] = unlock(key_file.getvalue(), unlock_pass)
-                except KeyError_ as exc:
+                except KeyFileError as exc:
                     st.session_state.pop("keys", None)
                     st.error(str(exc))
         if "keys" in st.session_state:
@@ -93,9 +104,12 @@ with tab_keys:
 # ==================================================================
 with tab_create:
     st.subheader("Create Qubit Talk")
+    sender = st.session_state.get("keys")
+    if sender is None:
+        st.info("🔑 Unlock your key in the **My Keys** tab first. It signs your talk.")
 
     uploaded = st.file_uploader("Upload PNG", type=["png"], key="create_png")
-
+    recipient_file = st.file_uploader("Recipient's public key (.json)", type=["json"], key="recipient_pub")
     message = st.text_area("Enter hidden message", placeholder="Top-secret payload…")
     col1, col2 = st.columns(2)
     with col1:
@@ -104,6 +118,7 @@ with tab_create:
         )
     with col2:
         retention = st.slider("Retention (days)", min_value=1, max_value=365, value=30)
+    st.caption("Sensitivity and retention feed the HNDL risk advisor (coming soon); they do not change encryption yet.")
 
     mode = st.radio(
         "Recipient mode",
@@ -112,50 +127,58 @@ with tab_create:
     )
 
     if st.button("🛡️ Protect & Embed", type="primary"):
-        if uploaded is None or not message:
-            st.warning("Upload a PNG and enter a message first.")
+        st.session_state.pop("protected", None)
+        if sender is None or uploaded is None or recipient_file is None or not message:
+            st.warning("Unlock your key, upload a PNG and the recipient's public key, and enter a message.")
+        elif mode != "Single recipient":
+            st.warning("Only single-recipient talks are supported in this MVP.")
         else:
-            protected_bytes = protect_png(uploaded.getvalue(), message, sensitivity, retention, mode)
-            st.success(
-                f"✅ Embedded with HNDL hybrid scheme · sensitivity **{sensitivity}** · "
-                f"retention **{retention} days** · mode **{mode}**"
-            )
-            st.download_button(
-                "⬇️ Download protected image",
-                data=protected_bytes,
-                file_name="protected_qubit_talk.png",
-                mime="image/png",
-            )
+            try:
+                st.session_state["protected"] = protect_png(
+                    uploaded.getvalue(), message, sender, recipient_file.getvalue()
+                )
+            except (CryptoError, MediaError) as exc:
+                st.error(str(exc))
+    if "protected" in st.session_state:
+        st.success(
+            f"✅ Encrypted, signed and hidden in the image · {ALGORITHMS.key_establishment} + "
+            f"{ALGORITHMS.encryption} + {ALGORITHMS.signature} (Classical profile)"
+        )
+        st.download_button(
+            "⬇️ Download protected image",
+            data=st.session_state["protected"],
+            file_name="protected_qubit_talk.png",
+            mime="image/png",
+        )
 
 # ==================================================================
 # TAB 2 — Unlock Qubit Talk
 # ==================================================================
 with tab_unlock:
     st.subheader("Unlock Qubit Talk")
+    recipient = st.session_state.get("keys")
+    if recipient is None:
+        st.info("🔑 Unlock your key in the **My Keys** tab first. It decrypts talks sent to you.")
 
     protected = st.file_uploader("Upload protected image", type=["png"], key="unlock_png")
+    sender_file = st.file_uploader("Sender's public key (.json)", type=["json"], key="sender_pub")
 
     if st.button("🔎 Extract & Verify"):
-        if protected is None:
-            st.warning("Upload a protected image first.")
+        if recipient is None or protected is None or sender_file is None:
+            st.warning("Unlock your key and upload the protected image and the sender's public key.")
         else:
-            result = extract_and_verify(protected.getvalue())
-
-            # Signature status
+            result = extract_and_verify(protected.getvalue(), recipient, sender_file.getvalue())
+            if result["error"]:
+                st.error(f"❌ {result['error']}")
             if result["signature_valid"]:
                 st.success(f"✅ Signature valid — {result['algorithm']}")
-            else:
-                st.error("❌ Signature invalid")
-
-            # Tamper detection
             if result["tamper_detected"]:
-                st.error("🚨 Tamper detected — image has been modified!")
-            else:
+                st.error("🚨 Tamper detected — the image or its contents were modified!")
+            elif result["signature_valid"]:
                 st.success("🛡️ No tampering detected")
-
-            # Decrypted message
-            with st.expander("🔓 Reveal decrypted message", expanded=True):
-                st.code(result["message"], language="text")
+            if result["signature_valid"]:
+                with st.expander("🔓 Reveal decrypted message", expanded=True):
+                    st.code(result["message"], language="text")
 
 # ==================================================================
 # TAB 3 — Quantum Risk & Benchmarks

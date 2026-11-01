@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from crypto.keys import KeyError_, generate, unlock
+from crypto.keys import KeyFileError, generate, unlock
 
 
 class TestKeys(unittest.TestCase):
@@ -14,20 +14,22 @@ class TestKeys(unittest.TestCase):
 
     def test_private_file_has_no_plaintext_key_and_public_has_no_private(self):
         private, public = generate("alice", "correct horse")
-        self.assertIn(b"ENCRYPTED PRIVATE KEY", json.loads(private)["x25519_pem"].encode())
+        self.assertIn(
+            b"ENCRYPTED PRIVATE KEY", json.loads(private)["x25519_pem"].encode()
+        )
         self.assertNotIn(b"PRIVATE", public)
 
     def test_weak_passphrase_and_empty_name_rejected(self):
-        with self.assertRaises(KeyError_):
+        with self.assertRaises(KeyFileError):
             generate("alice", "short")
-        with self.assertRaises(KeyError_):
+        with self.assertRaises(KeyFileError):
             generate("  ", "correct horse")
 
     def test_wrong_passphrase_and_garbage_file_fail_clearly(self):
         private, _ = generate("alice", "correct horse")
-        with self.assertRaises(KeyError_):
+        with self.assertRaises(KeyFileError):
             unlock(private, "wrong passphrase")
-        with self.assertRaises(KeyError_):
+        with self.assertRaises(KeyFileError):
             unlock(b"not json", "correct horse")
 
 
