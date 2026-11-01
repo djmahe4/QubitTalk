@@ -14,6 +14,13 @@ SUPPORTED_VERSIONS = {"1.0"}
 NONCE_LENGTH_BYTES = 12
 
 
+def _text(value: Any, field: str) -> str:
+    """Return `value` if it is a string; never coerce, so numbers/lists/null are rejected."""
+    if not isinstance(value, str):
+        raise ValueError(f"Envelope field '{field}' must be a string, got {type(value).__name__}")
+    return value
+
+
 @dataclass(frozen=True)
 class EnvelopeAlgorithms:
     key_establishment: str  # e.g., "X25519+ML-KEM-768" or "X25519"
@@ -79,9 +86,9 @@ class EncryptionEnvelope:
 
             alg_data = data["algorithms"]
             alg = EnvelopeAlgorithms(
-                key_establishment=alg_data["key_establishment"],
-                encryption=alg_data["encryption"],
-                signature=alg_data["signature"],
+                key_establishment=_text(alg_data["key_establishment"], "key_establishment"),
+                encryption=_text(alg_data["encryption"], "encryption"),
+                signature=_text(alg_data["signature"], "signature"),
             )
 
             ephemeral_public_key = base64.b64decode(data["ephemeral_public_key"], validate=True)
@@ -95,8 +102,8 @@ class EncryptionEnvelope:
 
             return cls(
                 version=version,
-                sender_id=str(data["sender_id"]),
-                recipient_id=str(data["recipient_id"]),
+                sender_id=_text(data["sender_id"], "sender_id"),
+                recipient_id=_text(data["recipient_id"], "recipient_id"),
                 algorithms=alg,
                 ephemeral_public_key=ephemeral_public_key,
                 kem_ciphertext=kem_ciphertext,

@@ -106,6 +106,26 @@ class TestEnvelope(unittest.TestCase):
         with self.assertRaises(ValueError):
             EncryptionEnvelope.from_bytes(json.dumps(raw).encode("utf-8"))
 
+    def test_non_string_text_fields_rejected(self):
+        """Numbers, lists and null must raise ValueError, not parse and fail later."""
+        env = sample_envelope()
+        for bad in (5, ["X25519"], None):
+            for path in (
+                ("algorithms", "key_establishment"),
+                ("algorithms", "encryption"),
+                ("algorithms", "signature"),
+                ("sender_id",),
+                ("recipient_id",),
+            ):
+                raw = json.loads(env.to_bytes().decode("utf-8"))
+                target = raw
+                for key in path[:-1]:
+                    target = target[key]
+                target[path[-1]] = bad
+                with self.subTest(field=path[-1], value=bad):
+                    with self.assertRaises(ValueError):
+                        EncryptionEnvelope.from_bytes(json.dumps(raw).encode("utf-8"))
+
     def test_non_json_input_rejected(self):
         with self.assertRaises(ValueError):
             EncryptionEnvelope.from_bytes(b"not json payload")
